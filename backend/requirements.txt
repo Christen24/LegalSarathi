@@ -17,7 +17,7 @@ SpeechRecognition==3.14.0
 edge-tts==6.1.15
 fpdf2==2.8.7
 pytest==8.3.3
-pytest-asyncio==0.24.2
+pytest-asyncio==0.24.0
 rank-bm25==0.2.2
 sentence-transformers==3.3.1
 paddlepaddle==2.6.2
