@@ -5,7 +5,7 @@ groq==0.13.1
 python-dotenv==1.0.1
 pydantic-settings==2.7.1
 langdetect==1.0.9
-httpx==0.28.1
+httpx>=0.26.0,<0.28.0
 deep-translator==1.11.4
 # ctranslate2==4.5.0  # Heavy optional dependency
 transformers==4.47.1
@@ -16,7 +16,7 @@ beautifulsoup4==4.12.3
 SpeechRecognition==3.14.0
 edge-tts==6.1.15
 fpdf2==2.8.7
-pytest==9.0.3
+pytest==8.3.3
 pytest-asyncio==0.24.0
 rank-bm25==0.2.2
 sentence-transformers==3.3.1
@@ -27,9 +27,14 @@ Pillow==11.0.0
 psycopg2-binary==2.9.10
 pgvector==0.3.2
 faiss-cpu==1.9.0
-numpy==2.2.0
+numpy>=1.24.0,<2.0
 jinja2==3.1.4
 python-multipart==0.0.20
 # ── Supabase integration ──────────────────────────────────────────────────────
 supabase==2.9.1
 python-jose[cryptography]==3.3.0
+# ── Observability ─────────────────────────────────────────────────────────────
+langfuse==2.36.1
+# ── Evaluation ────────────────────────────────────────────────────────────────
+ragas==0.1.21
+datasets==2.21.0

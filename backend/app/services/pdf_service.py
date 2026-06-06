@@ -20,6 +20,56 @@ class PDFService:
                 "fpdf2 is not installed. Run: pip install fpdf2"
             )
 
+        # Check if the input is HTML/Jinja template and extract clean text
+        if "<html>" in guidance_text or "<html" in guidance_text or "<!DOCTYPE html>" in guidance_text:
+            from html.parser import HTMLParser
+
+            class HTMLTextExtractor(HTMLParser):
+                def __init__(self):
+                    super().__init__()
+                    self.text_parts = []
+                    self.ignore_content = False
+
+                def handle_starttag(self, tag, attrs):
+                    if tag in ("style", "script", "head", "meta", "title"):
+                        self.ignore_content = True
+                    elif tag in ("p", "div", "h1", "h2", "h3", "h4", "tr", "td", "li"):
+                        self.text_parts.append("\n")
+                    elif tag == "br":
+                        self.text_parts.append("\n")
+
+                def handle_endtag(self, tag):
+                    if tag in ("style", "script", "head", "meta", "title"):
+                        self.ignore_content = False
+                    elif tag in ("p", "div", "h1", "h2", "h3", "h4", "tr", "td", "li"):
+                        self.text_parts.append("\n")
+
+                def handle_data(self, data):
+                    if not self.ignore_content:
+                        self.text_parts.append(data)
+
+                def get_text(self):
+                    raw = "".join(self.text_parts)
+                    # Replace Rupee symbol with Rs. to prevent FPDF unicode exception
+                    raw = raw.replace("\u20b9", "Rs.")
+                    lines = raw.split("\n")
+                    cleaned_lines = []
+                    for line in lines:
+                        stripped = line.strip()
+                        if stripped:
+                            cleaned_lines.append(stripped)
+                        else:
+                            if cleaned_lines and cleaned_lines[-1] != "":
+                                cleaned_lines.append("")
+                    return "\n".join(cleaned_lines)
+
+            extractor = HTMLTextExtractor()
+            extractor.feed(guidance_text)
+            guidance_text = extractor.get_text()
+
+        # Also ensure raw rupee symbol is replaced in general guidance plain text if present
+        guidance_text = guidance_text.replace("\u20b9", "Rs.")
+
         paragraphs = [p.strip() for p in guidance_text.split("\n") if p.strip()]
 
         doc_type = "LEGAL GUIDANCE"

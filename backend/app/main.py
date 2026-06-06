@@ -77,12 +77,26 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Legal Sarathi 2.0 API", lifespan=lifespan)
 
+# CORS — add FRONTEND_URL env var to allow any custom frontend origin (e.g. Vercel)
+_EXTRA_ORIGIN = os.getenv("FRONTEND_URL", "").rstrip("/")
+_ALLOWED_ORIGINS = [
+    "http://localhost:8080",
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:8080",
+    "http://127.0.0.1:5173",
+    "https://legal-sarathi.vercel.app",
+]
+if _EXTRA_ORIGIN and _EXTRA_ORIGIN not in _ALLOWED_ORIGINS:
+    _ALLOWED_ORIGINS.append(_EXTRA_ORIGIN)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080", "http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:8080", "http://127.0.0.1:5173"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Transcription", "X-Query-Result"],
 )
 
 # ── Chat History Router ───────────────────────────────────────────────────────
