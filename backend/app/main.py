@@ -3,6 +3,9 @@ from dotenv import load_dotenv
 import urllib.parse
 import json
 from pathlib import Path
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 _p1 = Path(__file__).resolve().parents[2] / ".env"
 _p2 = Path(__file__).resolve().parents[1] / ".env"
@@ -75,9 +78,15 @@ async def lifespan(app: FastAPI):
         print(f"[STARTUP ERROR] DocumentGenerationService failed to initialize: {e}")
     yield
 
-app = FastAPI(title="Legal Sarathi 2.0 API", lifespan=lifespan)
+# ── Rate Limiter ─────────────────────────────────────────────────────────────
+limiter = Limiter(key_func=get_remote_address, default_limits=["200/hour"])
 
-# CORS — add FRONTEND_URL env var to allow any custom frontend origin (e.g. Vercel)
+app = FastAPI(title="Legal Sarathi 2.0 API", lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# ── CORS ─────────────────────────────────────────────────────────────────────
+# FRONTEND_URL env var allows any custom Vercel/Netlify domain to be added at runtime
 _EXTRA_ORIGIN = os.getenv("FRONTEND_URL", "").rstrip("/")
 _ALLOWED_ORIGINS = [
     "http://localhost:8080",
@@ -94,10 +103,15 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-Requested-With"],
     expose_headers=["X-Transcription", "X-Query-Result"],
 )
+
+# ── Upload validation constants ───────────────────────────────────────────────
+_MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
+_ALLOWED_MIME_TYPES = {"application/pdf", "image/jpeg", "image/png", "image/webp", "image/tiff"}
+_IS_PROD = os.getenv("RENDER", "") or os.getenv("VERCEL", "")
 
 # ── Chat History Router ───────────────────────────────────────────────────────
 app.include_router(history_router)
@@ -152,6 +166,7 @@ async def health_check():
 
 
 @app.post("/api/query")
+@limiter.limit("10/minute")
 async def process_legal_query(req: QueryRequest, request: Request):
     if not orchestrator:
         raise HTTPException(status_code=503, detail="Orchestrator service is still initializing or failed to load.")
@@ -354,7 +369,9 @@ async def delete_user_document(doc_id: str, request: Request):
 # ── OCR Endpoints ─────────────────────────────────────────────────────────────
 
 @app.post("/api/ocr-extract")
+@limiter.limit("5/minute")
 async def ocr_extract(
+    request: Request,
     image: UploadFile = File(...),
     lang: str = Form(default="hi"),
 ):
@@ -365,7 +382,13 @@ async def ocr_extract(
     try:
         if not ocr_service:
             raise HTTPException(status_code=503, detail="OCR service is unavailable.")
+        # File type validation
+        if image.content_type and image.content_type not in _ALLOWED_MIME_TYPES:
+            raise HTTPException(status_code=415, detail=f"Unsupported file type: {image.content_type}")
         file_bytes = await image.read()
+        # File size validation
+        if len(file_bytes) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="File too large. Maximum size is 5MB.")
         filename = image.filename or ""
         extracted = ocr_service.extract(file_bytes, filename, lang)
         if not extracted:
@@ -374,11 +397,14 @@ async def ocr_extract(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] ocr_extract: {e}")
+        raise HTTPException(status_code=500, detail="OCR processing failed. Please try again.")
 
 
 @app.post("/api/ocr-query")
+@limiter.limit("5/minute")
 async def ocr_query(
+    request: Request,
     image: UploadFile = File(...),
     lang: str = Form(default="hi"),
 ):
@@ -389,7 +415,12 @@ async def ocr_query(
     try:
         if not ocr_service or not orchestrator:
             raise HTTPException(status_code=503, detail="OCR or Orchestrator service is unavailable.")
+        # File type and size validation
+        if image.content_type and image.content_type not in _ALLOWED_MIME_TYPES:
+            raise HTTPException(status_code=415, detail=f"Unsupported file type: {image.content_type}")
         file_bytes = await image.read()
+        if len(file_bytes) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="File too large. Maximum size is 5MB.")
         filename = image.filename or ""
         extracted = ocr_service.extract(file_bytes, filename, lang)
         if not extracted:
@@ -405,7 +436,8 @@ async def ocr_query(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] ocr_query: {e}")
+        raise HTTPException(status_code=500, detail="Document processing failed. Please try again.")
 
 
 # ── Voice Endpoints ───────────────────────────────────────────────────────────
@@ -428,7 +460,9 @@ async def text_to_speech(req: TTSRequest, background_tasks: BackgroundTasks):
 
 
 @app.post("/api/voice-query")
+@limiter.limit("10/minute")
 async def voice_query(
+    request: Request,
     background_tasks: BackgroundTasks,
     audio: UploadFile = File(...),
     lang: str = Form(default="hi")
