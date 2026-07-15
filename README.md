@@ -1,5 +1,5 @@
 # LegalSarathi
-
+Live App: legal-sarathi.vercel.app
 **Multilingual Indian legal AI** — helps citizens understand their rights in Hindi, Kannada, Tamil, Telugu, and 10+ other Indic languages using a hybrid RAG pipeline grounded in BNS 2023, BNSS 2023, BSA 2023, and the Constitution.
 
 ---
