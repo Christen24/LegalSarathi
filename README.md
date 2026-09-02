@@ -1,7 +1,249 @@
 # LegalSarathi
-Live App: legal-sarathi.vercel.app
 
-**Multilingual Indian legal AI** — helps citizens understand their rights in Hindi, Kannada, Tamil, Telugu, and 10+ other Indic languages using a hybrid RAG pipeline grounded in BNS 2023, BNSS 2023, BSA 2023, and the Constitution.
+**Live App:** https://legal-sarathi.vercel.app/
+
+> **Overview:** LegalSarathi is a multilingual Indian legal AI platform that combines LLMs, hybrid retrieval, citation verification, document intelligence, and voice/OCR interfaces to help users understand legal situations and take practical next steps. Instead of relying on an LLM alone, it grounds responses in a searchable legal corpus, re-ranks retrieved evidence, checks citations after generation, and can also analyze uploaded documents and generate structured legal drafts.
+
+LegalSarathi is designed around a simple idea: **legal AI should be accessible in the language people are comfortable using, while still being grounded in source material.**
+
+---
+
+## Why this project?
+
+Legal information is often difficult to access for non-lawyers because of legal terminology, language barriers, and the amount of source material that must be searched before reaching a useful answer.
+
+LegalSarathi approaches that problem as an **AI systems engineering problem**, not just a chatbot problem:
+
+- Accept questions in multiple Indian languages.
+- Translate queries into a representation that works well for retrieval and LLM reasoning.
+- Combine **sparse keyword retrieval** and **dense semantic retrieval**.
+- Fuse the two retrieval signals with **Reciprocal Rank Fusion (RRF)**.
+- Re-rank candidates with a **CrossEncoder** before generation.
+- Add live web context when needed.
+- Generate structured answers with an LLM.
+- Audit citations after generation against the retrieved legal chunks.
+- Support voice input, OCR for uploaded documents, document chat, and legal-document generation.
+- Cache repeated single-turn queries to avoid unnecessary recomputation.
+
+---
+
+## Highlights
+
+| Capability | Implementation |
+|---|---|
+| Multilingual legal assistance | Indic-language input/output with translation layer |
+| Hybrid RAG | BM25 + dense vector retrieval + RRF |
+| Semantic reranking | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
+| LLM synthesis | Groq `llama-3.3-70b-versatile` |
+| Citation verification | `CitationAuditService` validates cited section IDs |
+| Vector search | Neon PostgreSQL + pgvector, with local FAISS fallback |
+| Embeddings | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` |
+| Live legal context | Tavily / Serper search integration |
+| Voice | Groq Whisper STT + edge-tts |
+| OCR | PaddleOCR for image/PDF text extraction |
+| Document chat | Context-constrained chat over uploaded documents |
+| Legal document generation | Jinja2-based templates with structured fields |
+| Observability | Optional Langfuse traces and citation-quality score |
+| Performance | Async orchestration, parallel retrieval, and LRU caching |
+| Frontend | React 18 + Vite |
+| Backend | FastAPI + Uvicorn |
+| Auth / data services | Supabase |
+| Database | Neon PostgreSQL / pgvector |
+
+---
+
+## Core Features
+
+### 1. Multilingual Legal Assistant
+
+The application supports legal questions across a broad set of Indian languages. The current language map includes:
+
+**Hindi · Tamil · Telugu · Marathi · Bengali · Gujarati · Kannada · Malayalam · Punjabi · Urdu · Odia · Assamese · English**
+
+The backend can use a fast translation path for development or a local IndicTrans2-based backend when configured.
+
+---
+
+### 2. Hybrid Retrieval-Augmented Generation
+
+The core legal-answering workflow does not depend on a single retrieval method.
+
+A query passes through multiple stages:
+
+```mermaid
+flowchart LR
+    A[User Query] --> B[Translate to English]
+    B --> C{Parallel Retrieval}
+    C --> D[BM25 Sparse Search]
+    C --> E[Dense Vector Search]
+    C --> F[Live Web Search]
+    D --> G[RRF Fusion]
+    E --> G
+    G --> H[CrossEncoder Reranking]
+    H --> I[LLM Synthesis]
+    I --> J[Citation Audit]
+    J --> K[Structured Response]
+```
+
+### Retrieval stages
+
+**Sparse retrieval — BM25**
+
+BM25 captures exact legal terminology, statute names, section numbers, and important keywords.
+
+**Dense retrieval — Sentence Transformers + vector search**
+
+The project uses:
+
+`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+
+The resulting embeddings can be queried against **Neon pgvector** or the local **FAISS** fallback.
+
+**Reciprocal Rank Fusion**
+
+Instead of trying to directly average incompatible BM25 and vector similarity scores, LegalSarathi combines rankings using RRF.
+
+```text
+score(d) = 1 / (k + rank_dense)
+         + 1 / (k + rank_sparse)
+```
+
+The implementation uses `k = 60`.
+
+**CrossEncoder reranking**
+
+The merged candidates are then scored again using:
+
+`cross-encoder/ms-marco-MiniLM-L-6-v2`
+
+Only the highest-ranked legal chunks are forwarded to the synthesis stage.
+
+---
+
+## Citation-Grounded Generation
+
+One of the main design goals is to make generated legal guidance easier to trace back to retrieved material.
+
+The pipeline injects the retrieved section IDs into the LLM context and instructs the model to cite them using identifiers such as:
+
+```text
+[BNS_73]
+[BNSS_50]
+[CONST_22]
+```
+
+After generation, `CitationAuditService`:
+
+1. Extracts explicit citation IDs from the answer.
+2. Looks for inline section references.
+3. Compares cited IDs with the retrieved section IDs.
+4. Produces:
+   - verified citations
+   - unverified citations
+   - retrieved-but-uncited chunks
+   - a `citation_score`
+   - a human-readable verification badge
+
+This makes citation checking a **post-generation validation step**, rather than assuming that an LLM citation is correct simply because it looks plausible.
+
+---
+
+## Parallel Backend Orchestration
+
+The main query flow is coordinated by the `Orchestrator`.
+
+For a cache miss, the system:
+
+1. Translates the incoming query.
+2. Runs legal-key extraction, web search, hybrid retrieval, and optional specialist inference concurrently.
+3. Re-ranks the retrieved legal chunks.
+4. Builds the final RAG context.
+5. Calls Groq for structured synthesis.
+6. Audits citations against the retrieved evidence.
+7. Returns structured JSON to the frontend.
+
+The orchestration uses `asyncio.gather` and `asyncio.to_thread` where appropriate.
+
+### LRU caching
+
+Single-turn queries are cached in an in-memory LRU cache.
+
+- Maximum entries: `100`
+- TTL: `1 hour`
+
+This avoids repeating translation, retrieval, reranking, and generation for identical recent requests.
+
+---
+
+## Multimodal Legal Assistance
+
+### Voice input
+
+The voice pipeline uses:
+
+- **Groq Whisper**: `whisper-large-v3-turbo` for speech-to-text
+- **edge-tts** for text-to-speech
+
+Users can submit voice queries and receive synthesized spoken responses.
+
+### OCR / document analysis
+
+Uploaded legal PDFs and images can be processed with **PaddleOCR**.
+
+The backend supports:
+
+- OCR extraction only
+- OCR + legal query
+- Document-specific chat over extracted content
+
+Document chat deliberately bypasses the normal legal RAG flow: the extracted document itself becomes the retrieval context for document-focused questions.
+
+---
+
+## Legal Document Generation
+
+The project includes structured Jinja2-based templates for multiple document types.
+
+Current document templates include:
+
+1. RTI Application
+2. Consumer Complaint
+3. Tenant Defense
+4. POSH Complaint
+5. Bail Application
+6. FIR Draft
+7. Labour Agreement
+8. Legal Notice
+9. Affidavit
+
+The `DocumentGenerationService` defines field mappings for each template so the UI/backend can collect structured inputs instead of relying entirely on free-form generation.
+
+---
+
+## Frontend Experience
+
+The frontend is a **React 18 + Vite** application.
+
+Key application areas exposed by the router include:
+
+- Home
+- AI Chat
+- Documents
+- Document Wizard
+- Portal Tracker
+- Lawyer discovery and lawyer profiles
+- RTI workflow
+- Community
+- Notifications
+- Cases
+- Profile
+- Saved documents
+- Appointments
+- Saved lawyers
+- Help Center
+- Authentication / onboarding flows
+
+The project also contains curated lawyer-directory datasets for Bengaluru and multiple Karnataka cities.
 
 ---
 
@@ -9,273 +251,464 @@ Live App: legal-sarathi.vercel.app
 
 ```mermaid
 graph TD
-    User((User)) -->|Text / Voice / Image| Frontend[React 18 + Vite Frontend]
-    Frontend -->|HTTP REST| API[FastAPI Entry Point]
+    U[User] --> F[React 18 + Vite]
+    F -->|HTTP REST| A[FastAPI]
 
-    subgraph Backend Core
-        API --> Orchestrator[Orchestrator Engine]
-        API --> Voice[VoiceService]
-        API --> OCR[OCRService]
-        API --> PDF[PDFService]
-        API --> Doc[DocService]
+    subgraph Backend
+        A --> O[Orchestrator]
+        A --> V[VoiceService]
+        A --> OCR[OCRService]
+        A --> DG[DocumentGenerationService]
+        A --> DC[Document Chat]
+        A --> H[History / Auth APIs]
+
+        O --> T[TranslatorService]
+        O --> P[Parallel Task Pool]
+        P --> G[GroqService]
+        P --> S[SearchService]
+        P --> R[RAGService]
+        P --> SP[SpecialistService]
+
+        O --> RR[RerankerService]
+        O --> CA[CitationAuditService]
     end
 
-    subgraph Intelligence Pipeline
-        Orchestrator --> Translate[TranslatorService]
-        Orchestrator --> Parallel[Parallel Execution Pool]
-
-        Parallel --> Groq[GroqService]
-        Parallel --> Search[SearchService]
-        Parallel --> RAG[RAGService]
-        Parallel --> Specialist[SpecialistService]
-
-        Orchestrator --> Rerank[RerankerService]
-        Orchestrator --> Audit[CitationAuditService]
-    end
-
-    Groq -.->|Llama-3.3-70B| GroqAPI[Groq Cloud API]
-    RAG -.->|Vector Search| DB[(FAISS / Neon pgvector)]
-    OCR -.-> Paddle[Local PaddleOCR]
-    Specialist -.-> LocalLLM[Local GGUF Model]
-    Voice -.-> Whisper[Groq Whisper STT]
+    G -->|Llama 3.3 70B| GC[Groq API]
+    R -->|Primary| N[Neon + pgvector]
+    R -->|Fallback| FAISS[Local FAISS]
+    OCR --> PO[PaddleOCR]
+    V --> W[Groq Whisper]
+    V --> TTS[edge-tts]
+    F --> SB[Supabase]
 ```
 
 ---
 
-## RAG Pipeline
+## Technology Stack
 
-Six-stage pipeline from raw user query to structured, citation-verified legal advice:
+### Frontend
 
-```mermaid
-flowchart LR
-    A[User Query<br/>Hindi / Kannada / ...] --> B[Translate to English<br/>FastTranslator / IndicTrans2]
-    B --> C{Parallel Phase}
-    C --> D[BM25 Sparse Retrieval]
-    C --> E[Dense Vector Retrieval<br/>Neon pgvector / FAISS]
-    C --> F[Live Web Search<br/>Tavily + Serper]
-    D --> G[RRF Merge<br/>Reciprocal Rank Fusion]
-    E --> G
-    G --> H[CrossEncoder Reranking<br/>ms-marco-MiniLM-L-6-v2]
-    H --> I[Groq Synthesis<br/>Llama-3.3-70B]
-    I --> J[Citation Audit<br/>Hallucination Detection]
-    J --> K[Structured JSON Response<br/>Translated back to source language]
-```
+- React 18
+- Vite
+- TypeScript
+- React Router
+- TanStack Query
+- Tailwind CSS
+- Radix UI
+- Recharts
+- Supabase client
 
-### Stage Details
+### Backend
 
-| Stage | Component | What it does |
-|---|---|---|
-| **Translate** | `TranslatorService` | Normalises any Indic language to English for embedding fidelity |
-| **BM25** | `rank_bm25.BM25Okapi` | Sparse keyword match over the full corpus |
-| **Dense** | `paraphrase-multilingual-MiniLM-L12-v2` + Neon pgvector / FAISS | Semantic vector search |
-| **RRF Merge** | `_rrf_merge()` in `rag_service.py` | Fuses BM25 + dense rankings without score normalisation |
-| **Rerank** | `CrossEncoder` ms-marco-MiniLM-L-6-v2 | Bi-directional attention rescoring of top-10 candidates |
-| **Synthesis** | Groq API `llama-3.3-70b-versatile` | Produces structured JSON: situation, rights, steps, helplines |
-| **Audit** | `CitationAuditService` | Verifies every `[section_ref]` cited by LLM was in retrieved chunks |
+- Python
+- FastAPI
+- Uvicorn
+- Pydantic Settings
+- AsyncIO
 
----
+### AI / ML
 
-## Evaluation Results (Ragas)
+- Groq LLMs
+- Sentence Transformers
+- BM25
+- FAISS
+- pgvector
+- CrossEncoder
+- Transformers
+- PyTorch
+- Ragas
+- Langfuse
 
-Run the evaluation pipeline after building the index:
+### Multimodal
 
-```bash
-python backend/scripts/eval_ragas.py
-```
+- Groq Whisper
+- edge-tts
+- PaddleOCR
+- PyMuPDF
+- Pillow
 
-| Metric | Baseline (dense only) | Enhanced (hybrid + rerank) | Delta |
-|---|---|---|---|
-| Faithfulness | - | - | - |
-| Answer Relevancy | - | - | - |
-| Context Precision | - | - | - |
+### Data / Services
 
-> Fill in the table after running `eval_ragas.py`. Results are also saved to `backend/data/eval_results.json` with a full per-question breakdown.
-
----
-
-## Observability (Langfuse)
-
-Every query is traced with 5 spans: `translation`, `parallel_retrieval`, `reranking`, `groq_synthesis`, `citation_audit`. A `citation_quality` score is attached to each trace.
-
-**Setup:**
-
-1. Create a free account at [cloud.langfuse.com](https://cloud.langfuse.com)
-2. Add to your `.env`:
-
-```env
-LANGFUSE_PUBLIC_KEY=pk-lf-...
-LANGFUSE_SECRET_KEY=sk-lf-...
-LANGFUSE_HOST=https://cloud.langfuse.com   # optional, this is the default
-```
-
-3. Restart the backend. Traces appear in the Langfuse dashboard immediately.
-
-**Graceful degradation:** If keys are absent or the package is not installed, the system runs identically — no errors, no performance impact.
+- PostgreSQL
+- Neon
+- Supabase
+- Tavily
+- Serper
+- Jinja2
 
 ---
 
-## Setup Instructions
+## Project Structure
+
+```text
+LegalSarathi-main/
+├── backend/
+│   ├── app/
+│   │   ├── agents/
+│   │   │   └── orchestrator.py
+│   │   ├── api/
+│   │   │   └── history.py
+│   │   ├── core/
+│   │   │   └── config.py
+│   │   ├── middleware/
+│   │   │   └── auth.py
+│   │   ├── services/
+│   │   │   ├── rag_service.py
+│   │   │   ├── reranker_service.py
+│   │   │   ├── groq_service.py
+│   │   │   ├── citation_audit.py
+│   │   │   ├── search_service.py
+│   │   │   ├── translator.py
+│   │   │   ├── voice_service.py
+│   │   │   ├── ocr_service.py
+│   │   │   ├── document_generation_service.py
+│   │   │   ├── doc_service.py
+│   │   │   └── supabase_service.py
+│   │   ├── templates/
+│   │   └── main.py
+│   ├── scripts/
+│   │   ├── ingest_corpus.py
+│   │   ├── expand_corpus.py
+│   │   ├── eval_ragas.py
+│   │   └── setup_local_translation.py
+│   ├── tests/
+│   └── requirements.txt
+│
+├── frontend/
+│   ├── public/
+│   ├── src/
+│   │   ├── components/
+│   │   ├── pages/
+│   │   ├── data/
+│   │   └── App.tsx
+│   ├── package.json
+│   └── vercel.json
+│
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── DEPLOYMENT.md
+│   ├── PRD.md
+│   ├── PROJECT_OVERVIEW.md
+│   └── QA_TEST_REPORT.md
+│
+├── .env.example
+├── LOCAL_SETUP.md
+└── README.md
+```
+
+---
+
+## Local Setup
 
 ### Prerequisites
 
 - Python 3.11+
-- Node.js 18+ (for frontend)
-- PostgreSQL (optional — Neon cloud account or local)
+- Node.js 18+
+- PostgreSQL / Neon (optional when using FAISS fallback)
+- Poppler for PDF OCR
+- Playwright Chromium for browser-based PDF generation
 
-### 1. Clone and configure environment
+### 1. Clone the repository
 
 ```bash
 git clone <repo-url>
-cd legalsarathi-claudefix
-
-# Copy and fill in secrets
-cp .env.example .env
-# Required: GROQ_API_KEY
-# Optional: NEON_DATABASE_URL, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
+cd LegalSarathi-main
 ```
 
-### 2. Backend — Python environment
+### 2. Configure environment variables
+
+```bash
+cp .env.example .env
+```
+
+At minimum, configure:
+
+```env
+GROQ_API_KEY=your_groq_key
+```
+
+Optional integrations include:
+
+```env
+NEON_DATABASE_URL=your_neon_connection_string
+
+LANGFUSE_PUBLIC_KEY=your_public_key
+LANGFUSE_SECRET_KEY=your_secret_key
+LANGFUSE_HOST=https://cloud.langfuse.com
+```
+
+The translation backend can be selected with:
+
+```env
+TRANSLATION_BACKEND=fast
+```
+
+or, for the local IndicTrans2 path:
+
+```env
+TRANSLATION_BACKEND=local
+```
+
+### 3. Backend
 
 ```bash
 cd backend
 
-# Create and activate virtual environment
 python -m venv venv
-# Windows:
-venv\Scripts\activate
-# macOS/Linux:
-source venv/bin/activate
+```
 
-# Install dependencies
+Windows:
+
+```powershell
+venv\Scripts\activate
+```
+
+macOS/Linux:
+
+```bash
+source venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
 pip install -r requirements.txt
 ```
 
-### 3. Build the legal corpus index
+Install the Chromium browser required by the PDF generation path:
 
 ```bash
-# Minimal seed corpus (35 sections, fast):
-python scripts/ingest_corpus.py
+playwright install chromium
+```
 
-# Full corpus with real statute PDFs (recommended — 300+ sections):
+### 4. Build the retrieval index
+
+For a quick seed corpus:
+
+```bash
+python scripts/ingest_corpus.py
+```
+
+For the expanded statute corpus:
+
+```bash
 python scripts/expand_corpus.py
 ```
 
-### 4. Start the backend
+The backend can use local FAISS as a fallback, while Neon pgvector is used when a database connection is configured.
+
+### 5. Start the backend
 
 ```bash
-# From backend/ directory:
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --reload --port 8000
 ```
 
-Health check: `curl http://localhost:8000/health`
+### 6. Start the frontend
 
-### 5. Frontend
+In another terminal:
 
 ```bash
 cd frontend
 npm install
 npm run dev
-# Opens at http://localhost:5173
-```
-
-### 6. Run tests
-
-```bash
-# From backend/ directory:
-pytest tests/test_services.py -v
-```
-
-### 7. Run Ragas evaluation (optional — requires built index + Groq key)
-
-```bash
-python scripts/eval_ragas.py
 ```
 
 ---
 
-## Key Technical Decisions
+## Evaluation
 
-### Why RRF over simple score averaging?
+A Ragas evaluation pipeline is included:
 
-Reciprocal Rank Fusion (`score = 1/(k + rank)`) is robust to score-scale mismatch between BM25 (unbounded log-scores) and cosine similarity (0–1). Simple averaging would make one signal dominate depending on corpus size. RRF with `k=60` (the standard value from the original paper) treats both signals equally without any normalisation tuning. The `_rrf_merge()` implementation is intentionally left untouched — it is correct.
+```bash
+python backend/scripts/eval_ragas.py
+```
 
-### Why CrossEncoder over bi-encoder for reranking?
+The evaluation script is intended to compare retrieval/generation configurations using metrics such as:
 
-Bi-encoders encode query and passage independently — they are fast but miss token-level interactions between query terms and passage text. The CrossEncoder (`ms-marco-MiniLM-L-6-v2`) sees the full `(query, passage)` pair simultaneously via self-attention, producing much higher-quality relevance scores. In legal text, where the difference between "Section 50 — inform of grounds" and "Section 51 — 24-hour limit" matters enormously, this interaction is critical. The cost (23 MB, ~20ms per batch on CPU) is acceptable at reranking stage because we only score top-10 candidates.
+- Faithfulness
+- Answer Relevancy
+- Context Precision
 
-### Why IndicTrans2 for local translation vs. Google Translate API?
+Results are written to the evaluation output path used by the script.
 
-Google Translate API has per-request cost, rate limits, and requires network access — making it unsuitable for offline or high-volume deployments. IndicTrans2 (AI4Bharat) is specifically trained on Indian language pairs including code-switched text (e.g. "mujhe IPC Section 420 ke baare mein batao"). It significantly outperforms generic neural MT on legal domain Hindi, Marathi, and Bengali. The `FastTranslator → LocalTranslator` fallback chain ensures Google Translate is used in development while IndicTrans2 runs in production without changing any application code.
+> The README intentionally does not hard-code benchmark numbers. Run the evaluation script on the current corpus/model configuration before publishing fresh results.
+
+---
+
+## Observability
+
+Langfuse integration is optional.
+
+When configured, the orchestrator records stages including:
+
+- `translation`
+- `parallel_retrieval`
+- `reranking`
+- `groq_synthesis`
+- `citation_audit`
+
+A `citation_quality` score is attached to the trace.
+
+If Langfuse credentials are absent, the application continues without tracing.
 
 ---
 
 ## API Reference
 
-| Endpoint | Method | Description |
+The FastAPI backend exposes endpoints for the main AI and document workflows.
+
+| Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/query` | POST | Main RAG query — text in any language |
-| `/api/voice-query` | POST | Audio in → MP3 legal advice out |
-| `/api/ocr-query` | POST | PDF/image → text extraction → RAG query |
-| `/api/ocr-extract` | POST | Extract text from PDF/image (no RAG) |
+| `/api/query` | POST | Main legal AI query |
+| `/api/voice-query` | POST | Voice input → transcription → legal response |
+| `/api/ocr-query` | POST | OCR uploaded file → legal analysis |
+| `/api/ocr-extract` | POST | OCR extraction only |
 | `/api/doc-chat` | POST | Chat with an uploaded document |
-| `/api/documents/ingest` | POST | Upload and embed a user document |
-| `/api/documents/available` | GET | List available legal document templates |
-| `/api/documents/render` | POST | Render a document template to HTML |
-| `/api/documents/generate-pdf` | POST | Render template and return PDF |
-| `/api/tts` | POST | Text-to-speech in any supported language |
+| `/api/documents/ingest` | POST | Upload/embed a user document |
+| `/api/documents/available` | GET | List document templates |
+| `/api/documents/render` | POST | Render a selected document template |
+| `/api/documents/generate-pdf` | POST | Generate a PDF document |
+| `/api/tts` | POST | Text-to-speech |
 | `/health` | GET | Health check |
 
 ---
 
 ## Environment Variables
 
-| Variable | Required | Description |
+| Variable | Required | Purpose |
 |---|---|---|
-| `GROQ_API_KEY` | ✅ Yes | Groq API key for Llama-3.3-70B and Whisper |
-| `NEON_DATABASE_URL` | ⚠️ Optional | PostgreSQL connection string for Neon pgvector |
-| `LANGFUSE_PUBLIC_KEY` | ⚠️ Optional | Langfuse tracing public key |
-| `LANGFUSE_SECRET_KEY` | ⚠️ Optional | Langfuse tracing secret key |
-| `LANGFUSE_HOST` | ⚠️ Optional | Langfuse host (default: cloud.langfuse.com) |
-| `EMBEDDING_MODEL` | ⚠️ Optional | Override embedding model (default: paraphrase-multilingual-MiniLM-L12-v2) |
-| `TRANSLATION_BACKEND` | ⚠️ Optional | `fast` (Google, default) or `local` (IndicTrans2) |
+| `GROQ_API_KEY` | Yes | Groq LLM and Whisper access |
+| `NEON_DATABASE_URL` | Optional | Neon PostgreSQL / pgvector |
+| `LANGFUSE_PUBLIC_KEY` | Optional | Langfuse tracing |
+| `LANGFUSE_SECRET_KEY` | Optional | Langfuse tracing |
+| `LANGFUSE_HOST` | Optional | Langfuse host |
+| `TRANSLATION_BACKEND` | Optional | `fast` or `local` |
+| `EMBEDDING_MODEL` | Optional | Override the embedding model |
 
 ---
 
-## Project Structure
+## Design Decisions
 
+### Why hybrid retrieval?
+
+Legal queries frequently mix exact terminology with natural-language descriptions.
+
+For example:
+
+- BM25 is useful when the user mentions an exact act, section, or legal term.
+- Dense retrieval is useful when the user describes a situation without using the terminology present in the statute.
+- RRF combines both rankings without requiring the scores to be on the same scale.
+
+### Why rerank after fusion?
+
+The initial retrieval stage favors recall. The CrossEncoder stage favors precision by looking at the query and passage together.
+
+That lets the system retrieve broadly first, then spend more compute on a smaller candidate set.
+
+### Why validate citations after generation?
+
+An LLM can generate a convincing-looking legal reference even when that reference was not present in the supplied context.
+
+The citation audit exists specifically to catch that failure mode.
+
+### Why keep a local FAISS fallback?
+
+A local FAISS index makes it possible to run the core retrieval stack without requiring a cloud vector database. Neon pgvector can be enabled when persistent cloud retrieval is preferred.
+
+---
+
+## Developer Notes
+
+### Corpus ingestion
+
+The backend contains separate ingestion scripts for a smaller seed corpus and an expanded corpus.
+
+```bash
+python scripts/ingest_corpus.py
+python scripts/expand_corpus.py
 ```
-legalsarathi-claudefix/
-├── backend/
-│   ├── app/
-│   │   ├── agents/
-│   │   │   └── orchestrator.py        # Async parallel orchestrator + Langfuse tracing
-│   │   ├── services/
-│   │   │   ├── rag_service.py         # Hybrid BM25 + pgvector/FAISS + RRF
-│   │   │   ├── reranker_service.py    # CrossEncoder ms-marco-MiniLM-L-6-v2
-│   │   │   ├── groq_service.py        # Llama-3.3-70B synthesis + language guarantee
-│   │   │   ├── citation_audit.py      # Hallucination detection via section_ref matching
-│   │   │   ├── translator.py          # FastTranslator → LocalTranslator fallback
-│   │   │   ├── voice_service.py       # edge-tts TTS + Groq Whisper STT
-│   │   │   └── ocr_service.py         # PaddleOCR for PDF/image extraction
-│   │   └── main.py                    # FastAPI app with all endpoints
-│   ├── scripts/
-│   │   ├── ingest_corpus.py           # Seed corpus ingestion (35 sections)
-│   │   ├── expand_corpus.py           # Real statute PDF download + ingestion (300+ sections)
-│   │   └── eval_ragas.py              # Ragas evaluation pipeline (25 questions, 2 configs)
-│   ├── tests/
-│   │   └── test_services.py           # Pytest suite (all services mocked)
-│   └── requirements.txt
-├── frontend/
-│   └── src/
-│       ├── pages/                     # Chat, LawyerDiscovery, DocGenerator
-│       ├── components/                # UI components
-│       └── data/                      # Lawyer directory JSONs
-├── .env.example
-└── README.md
+
+### Local translation
+
+The default translation path is the fast translator. The repository also contains a local IndicTrans2 path that can be enabled through `TRANSLATION_BACKEND=local`.
+
+### Specialist inference
+
+The orchestrator can optionally call a local GGUF-backed specialist service. The service is isolated so that its availability does not prevent the main RAG pipeline from operating.
+
+---
+
+## Testing
+
+Frontend tests use Vitest and React Testing Library.
+
+```bash
+cd frontend
+npm test
+```
+
+Frontend production build:
+
+```bash
+npm run build
+```
+
+Backend service tests:
+
+```bash
+cd backend
+pytest tests/test_services.py -v
+```
+
+An additional QA report is available in:
+
+```text
+docs/QA_TEST_REPORT.md
 ```
 
 ---
 
-## Supported Languages
+## Security Notes
 
-Hindi (hi) · Tamil (ta) · Telugu (te) · Marathi (mr) · Bengali (bn) · Gujarati (gu) · Kannada (kn) · Malayalam (ml) · Punjabi (pa) · Urdu (ur) · Odia (or) · Assamese (as) · English (en)
+Do not commit real credentials.
+
+The repository expects secrets such as:
+
+- Groq API keys
+- Neon connection strings
+- Supabase service credentials
+- Tavily / Serper keys
+- Langfuse credentials
+
+to be provided through environment variables.
+
+For a public deployment, add rate limiting, upload-size/type validation, restrictive CORS, and production-safe error handling before treating the service as a production legal platform.
+
+---
+
+## Current Scope
+
+LegalSarathi is a **legal information and assistance prototype**, not a replacement for a qualified lawyer.
+
+Its goal is to help users understand legal concepts, identify relevant sources, organize information, and move toward appropriate next steps.
+
+For high-stakes legal decisions, users should verify the information against authoritative sources and seek professional legal advice.
+
+---
+
+## What's interesting technically?
+
+This project is intentionally broader than a basic "chat with a PDF" application.
+
+It combines:
+
+**multilingual NLP + hybrid information retrieval + semantic reranking + LLM orchestration + citation auditing + live search + OCR + speech + structured document generation + observability**
+
+The interesting engineering challenge is making these components work together as one pipeline while keeping the system usable on relatively constrained hardware and allowing cloud services to be added where they provide the most value.
+
+---
+
+## License
+
+This project follows the license included in the repository.
+
